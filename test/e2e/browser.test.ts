@@ -1,15 +1,15 @@
-import { test, expect } from "@playwright/test"
-import { CODE_SERVER_ADDRESS } from "../utils/constants"
+import { describe, test, expect } from "./baseFixture"
 
 // This is a "gut-check" test to make sure playwright is working as expected
-test("browser should display correct userAgent", async ({ page, browserName }) => {
-  const displayNames = {
-    chromium: "Chrome",
-    firefox: "Firefox",
-    webkit: "Safari",
-  }
-  await page.goto(CODE_SERVER_ADDRESS, { waitUntil: "networkidle" })
-  const userAgent = await page.evaluate("navigator.userAgent")
+describe("browser", true, () => {
+  test("browser should display correct userAgent", async ({ codeServerPage, browserName }) => {
+    const displayNames = {
+      chromium: "Chrome",
+      firefox: "Firefox",
+      webkit: "Safari",
+    }
+    const userAgent = await codeServerPage.page.evaluate(() => navigator.userAgent)
 
-  expect(userAgent).toContain(displayNames[browserName])
+    expect(userAgent).toContain(displayNames[browserName])
+  })
 })

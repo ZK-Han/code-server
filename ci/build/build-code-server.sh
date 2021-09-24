@@ -3,9 +3,6 @@ set -euo pipefail
 
 # Builds code-server into out and the frontend into dist.
 
-# MINIFY controls whether parcel minifies dist.
-MINIFY=${MINIFY-true}
-
 main() {
   cd "$(dirname "${0}")/../.."
 
@@ -19,21 +16,22 @@ main() {
   fi
 
   if ! [ -f ./lib/coder-cloud-agent ]; then
+    echo "Downloading the cloud agent..."
+
+    # for arch; we do not use OS from lib.sh and get our own.
+    # lib.sh normalizes macos to darwin - but cloud-agent's binaries do not
+    source ./ci/lib.sh
     OS="$(uname | tr '[:upper:]' '[:lower:]')"
+
     set +e
-    curl -fsSL "https://storage.googleapis.com/coder-cloud-releases/agent/latest/$OS/cloud-agent" -o ./lib/coder-cloud-agent
+    curl -fsSL "https://github.com/cdr/cloud-agent/releases/latest/download/cloud-agent-$OS-$ARCH" -o ./lib/coder-cloud-agent
     chmod +x ./lib/coder-cloud-agent
     set -e
   fi
 
-  parcel build \
-    --public-url "." \
-    --out-dir dist \
-    $([[ $MINIFY ]] || echo --no-minify) \
-    src/browser/register.ts \
-    src/browser/serviceWorker.ts \
-    src/browser/pages/login.ts \
-    src/browser/pages/vscode.ts
+  yarn browserify out/browser/register.js -o out/browser/register.browserified.js
+  yarn browserify out/browser/pages/login.js -o out/browser/pages/login.browserified.js
+  yarn browserify out/browser/pages/vscode.js -o out/browser/pages/vscode.browserified.js
 }
 
 main "$@"

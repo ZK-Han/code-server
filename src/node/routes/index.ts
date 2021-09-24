@@ -20,6 +20,7 @@ import * as apps from "./apps"
 import * as domainProxy from "./domainProxy"
 import * as health from "./health"
 import * as login from "./login"
+import * as logout from "./logout"
 import * as pathProxy from "./pathProxy"
 // static is a reserved keyword.
 import * as _static from "./static"
@@ -97,8 +98,8 @@ export const register = async (
   app.all("/proxy/(:port)(/*)?", (req, res) => {
     pathProxy.proxy(req, res)
   })
-  wsApp.get("/proxy/(:port)(/*)?", (req) => {
-    pathProxy.wsProxy(req as pluginapi.WebsocketRequest)
+  wsApp.get("/proxy/(:port)(/*)?", async (req) => {
+    await pathProxy.wsProxy(req as pluginapi.WebsocketRequest)
   })
   // These two routes pass through the path directly.
   // So the proxied app must be aware it is running
@@ -108,8 +109,8 @@ export const register = async (
       passthroughPath: true,
     })
   })
-  wsApp.get("/absproxy/(:port)(/*)?", (req) => {
-    pathProxy.wsProxy(req as pluginapi.WebsocketRequest, {
+  wsApp.get("/absproxy/(:port)(/*)?", async (req) => {
+    await pathProxy.wsProxy(req as pluginapi.WebsocketRequest, {
       passthroughPath: true,
     })
   })
@@ -136,10 +137,10 @@ export const register = async (
 
   if (args.auth === AuthType.Password) {
     app.use("/login", login.router)
+    app.use("/logout", logout.router)
   } else {
-    app.all("/login", (req, res) => {
-      redirect(req, res, "/", {})
-    })
+    app.all("/login", (req, res) => redirect(req, res, "/", {}))
+    app.all("/logout", (req, res) => redirect(req, res, "/", {}))
   }
 
   app.use("/static", _static.router)

@@ -1,4 +1,4 @@
-name: ci
+name: Build
 
 on:
   push:
@@ -18,14 +18,17 @@ jobs:
   prebuild:
     name: Pre-build checks
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
     steps:
       - name: Checkout repo
         uses: actions/checkout@v2
 
-      - name: Install Node.js v12
+      - name: Install Node.js v14
         uses: actions/setup-node@v2
         with:
-          node-version: "12"
+          node-version: "14"
 
       - name: Install helm
         uses: azure/setup-helm@v1.1
@@ -36,14 +39,12 @@ jobs:
         with:
           path: "**/node_modules"
           key: yarn-build-${{ hashFiles('**/yarn.lock') }}
+          restore-keys: |
+            yarn-build-
 
       - name: Install dependencies
         if: steps.cache-yarn.outputs.cache-hit != 'true'
         run: yarn --frozen-lockfile
-
-      - name: Audit for vulnerabilities
-        run: yarn _audit
-        if: success()
 
       - name: Run yarn fmt
         run: yarn fmt
@@ -57,19 +58,23 @@ jobs:
         run: yarn test:unit
         if: success()
 
-  build:
-    name: Build
+      - name: Upload coverage report to Codecov
+        run: yarn coverage
+        if: success()
+
+  audit-ci:
+    name: Run audit-ci
     needs: prebuild
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v2
-        with:
-          fetch-depth: 0
+      - name: Checkout repo
+        uses: actions/checkout@v2
 
-      - name: Install Node.js v12
+      - name: Install Node.js v14
         uses: actions/setup-node@v2
         with:
-          node-version: "12"
+          node-version: "14"
 
       - name: Fetch dependencies from cache
         id: cache-yarn
@@ -77,34 +82,72 @@ jobs:
         with:
           path: "**/node_modules"
           key: yarn-build-${{ hashFiles('**/yarn.lock') }}
+          restore-keys: |
+            yarn-build-
 
       - name: Install dependencies
         if: steps.cache-yarn.outputs.cache-hit != 'true'
         run: yarn --frozen-lockfile
 
+      - name: Audit for vulnerabilities
+        run: yarn _audit
+        if: success()
+
+  build:
+    name: Build
+    needs: prebuild
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
+
+      - name: Install Node.js v14
+        uses: actions/setup-node@v2
+        with:
+          node-version: "14"
+
+      # TODO@Teffen investigate why this omits code-oss-dev/node_modules
+      # - name: Fetch dependencies from cache
+      #   id: cache-yarn
+      #   uses: actions/cache@v2
+      #   with:
+      #     path: |
+      #       "**/node_modules"
+      #       "**/vendor/modules"
+      #       "**/vendor/modules/code-oss-dev/node_modules"
+      #     key: yarn-build-${{ hashFiles('**/yarn.lock') }}-${{ hashFiles('**/vendor/yarn.lock') }}
+      #     restore-keys: |
+      #       yarn-build-
+
+      - name: Install dependencies
+        # if: steps.cache-yarn.outputs.cache-hit != 'true'
+        run: yarn --frozen-lockfile
+
       - name: Build code-server
         run: yarn build
 
-      # Parse the hash of the latest commit inside lib/vscode
+      # Parse the hash of the latest commit inside vendor/modules/code-oss-dev
       # use this to avoid rebuilding it if nothing changed
       # How it works: the `git log` command fetches the hash of the last commit
-      # that changed a file inside `lib/vscode`. If a commit changes any file in there,
+      # that changed a file inside `vendor/modules/code-oss-dev`. If a commit changes any file in there,
       # the hash returned will change, and we rebuild vscode. If the hash did not change,
       # (for example, a change to `src/` or `docs/`), we reuse the same build as last time.
       # This saves a lot of time in CI, as compiling VSCode can take anywhere from 5-10 minutes.
-      - name: Get latest lib/vscode rev
+      - name: Get latest vendor/modules/code-oss-dev rev
         id: vscode-rev
-        run: echo "::set-output name=rev::$(git log -1 --format='%H' ./lib/vscode)"
+        run: echo "::set-output name=rev::$(jq -r '.devDependencies["code-oss-dev"]' vendor/package.json | sed -r 's|.*#(.*)$|\1|')"
 
       - name: Attempt to fetch vscode build from cache
         id: cache-vscode
         uses: actions/cache@v2
         with:
           path: |
-            lib/vscode/.build
-            lib/vscode/out-build
-            lib/vscode/out-vscode
-            lib/vscode/out-vscode-min
+            vendor/modules/code-oss-dev/.build
+            vendor/modules/code-oss-dev/out-build
+            vendor/modules/code-oss-dev/out-vscode
+            vendor/modules/code-oss-dev/out-vscode-min
           key: vscode-build-${{ steps.vscode-rev.outputs.rev }}
 
       - name: Build vscode
@@ -134,15 +177,16 @@ jobs:
     name: x86-64 Linux build
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     container: "centos:7"
 
     steps:
       - uses: actions/checkout@v2
 
-      - name: Install Node.js v12
+      - name: Install Node.js v14
         uses: actions/setup-node@v2
         with:
-          node-version: "12"
+          node-version: "14"
 
       - name: Install development tools
         run: |
@@ -194,30 +238,44 @@ jobs:
   # It is not feasible to cross-compile with CentOS.
 
   # Cross-compile notes: To compile native dependencies for arm64,
-  # we install the aarch64 cross toolchain and then set it as the default
+  # we install the aarch64/armv7l cross toolchain and then set it as the default
   # compiler/linker/etc. with the AR/CC/CXX/LINK environment variables.
   # qemu-user-static on ubuntu-16.04 currently doesn't run Node correctly,
-  # so we just build with "native"/x86_64 node, then download arm64 node
-  # and then put it in our release. We can't smoke test the arm64 build this way,
+  # so we just build with "native"/x86_64 node, then download arm64/armv7l node
+  # and then put it in our release. We can't smoke test the cross build this way,
   # but this means we don't need to maintain a self-hosted runner!
-  package-linux-arm64:
-    name: Linux ARM64 cross-compile build
+
+  # NOTE@jsjoeio:
+  # We used to use 16.04 until GitHub deprecated it on September 20, 2021
+  # See here: https://github.com/actions/virtual-environments/pull/3862/files
+  package-linux-cross:
+    name: Linux cross-compile builds
     needs: build
-    runs-on: ubuntu-16.04
+    runs-on: ubuntu-18.04
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        include:
+          - prefix: aarch64-linux-gnu
+            arch: arm64
+          - prefix: arm-linux-gnueabihf
+            arch: armv7l
+
     env:
-      AR: aarch64-linux-gnu-ar
-      CC: aarch64-linux-gnu-gcc
-      CXX: aarch64-linux-gnu-g++
-      LINK: aarch64-linux-gnu-g++
-      NPM_CONFIG_ARCH: arm64
+      AR: ${{ format('{0}-ar', matrix.prefix) }}
+      CC: ${{ format('{0}-gcc', matrix.prefix) }}
+      CXX: ${{ format('{0}-g++', matrix.prefix) }}
+      LINK: ${{ format('{0}-g++', matrix.prefix) }}
+      NPM_CONFIG_ARCH: ${{ matrix.arch }}
+      NODE_VERSION: v14.17.4
 
     steps:
       - uses: actions/checkout@v2
 
-      - name: Install Node.js v12
+      - name: Install Node.js v14
         uses: actions/setup-node@v2
         with:
-          node-version: "12"
+          node-version: "14"
 
       - name: Install nfpm
         run: |
@@ -225,7 +283,9 @@ jobs:
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       - name: Install cross-compiler
-        run: sudo apt install g++-aarch64-linux-gnu
+        run: sudo apt install $PACKAGE
+        env:
+          PACKAGE: ${{ format('g++-{0}', matrix.prefix) }}
 
       - name: Download npm package
         uses: actions/download-artifact@v2
@@ -238,14 +298,14 @@ jobs:
       - name: Build standalone release
         run: yarn release:standalone
 
-      - name: Replace node with arm64 equivalent
+      - name: Replace node with cross-compile equivalent
         run: |
-          wget https://nodejs.org/dist/v12.18.4/node-v12.18.4-linux-arm64.tar.gz
-          tar -xzf node-v12.18.4-linux-arm64.tar.gz node-v12.18.4-linux-arm64/bin/node --strip-components=2
+          wget https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-${NPM_CONFIG_ARCH}.tar.xz
+          tar -xf node-${NODE_VERSION}-linux-${NPM_CONFIG_ARCH}.tar.xz node-${NODE_VERSION}-linux-${NPM_CONFIG_ARCH}/bin/node --strip-components=2
           mv ./node ./release-standalone/lib/node
 
       - name: Build packages with nfpm
-        run: yarn package arm64
+        run: yarn package ${NPM_CONFIG_ARCH}
 
       - name: Upload release artifacts
         uses: actions/upload-artifact@v2
@@ -257,13 +317,14 @@ jobs:
     name: x86-64 macOS build
     needs: build
     runs-on: macos-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v2
 
-      - name: Install Node.js v12
+      - name: Install Node.js v14
         uses: actions/setup-node@v2
         with:
-          node-version: "12"
+          node-version: "14"
 
       - name: Install nfpm
         run: |
@@ -297,19 +358,21 @@ jobs:
     name: End-to-end tests
     needs: package-linux-amd64
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
-      PASSWORD: e45432jklfdsab
-      CODE_SERVER_ADDRESS: http://localhost:8080
+      # Since we build code-server we might as well run tests from the release
+      # since VS Code will load faster due to the bundling.
+      CODE_SERVER_TEST_ENTRY: "./release-packages/code-server-linux-amd64"
     steps:
       - uses: actions/checkout@v2
 
-      - name: Install Node.js v12
+      - name: Install Node.js v14
         uses: actions/setup-node@v2
         with:
-          node-version: "12"
+          node-version: "14"
 
-      - name: Install playwright
-        uses: microsoft/playwright-github-action@v1
+      - name: Install playwright OS dependencies
+        run: npx playwright install-deps
 
       - name: Fetch dependencies from cache
         id: cache-yarn
@@ -317,6 +380,8 @@ jobs:
         with:
           path: "**/node_modules"
           key: yarn-build-${{ hashFiles('**/yarn.lock') }}
+          restore-keys: |
+            yarn-build-
 
       - name: Download release packages
         uses: actions/download-artifact@v2
@@ -324,9 +389,11 @@ jobs:
           name: release-packages
           path: ./release-packages
 
-      - name: Untar code-server file
+      - name: Untar code-server release
         run: |
-          cd release-packages && tar -xzf code-server*-linux-amd64.tar.gz
+          cd release-packages
+          tar -xzf code-server*-linux-amd64.tar.gz
+          mv code-server*-linux-amd64 code-server-linux-amd64
 
       - name: Install dependencies
         if: steps.cache-yarn.outputs.cache-hit != 'true'
@@ -342,9 +409,7 @@ jobs:
           yarn install --check-files
 
       - name: Run end-to-end tests
-        run: |
-          ./release-packages/code-server*-linux-amd64/bin/code-server --log trace &
-          yarn test:e2e
+        run: yarn test:e2e
 
       - name: Upload test artifacts
         if: always()
@@ -356,47 +421,23 @@ jobs:
       - name: Remove release packages and test artifacts
         run: rm -rf ./release-packages ./test/test-results
 
-  docker-amd64:
-    runs-on: ubuntu-latest
-    needs: package-linux-amd64
+  trivy-scan-repo:
+    runs-on: ubuntu-20.04
     steps:
-      - uses: actions/checkout@v2
-
-      - name: Download release package
-        uses: actions/download-artifact@v2
+      - name: Checkout code
+        uses: actions/checkout@v2
+      - name: Run Trivy vulnerability scanner in repo mode
+        #Commit SHA for v0.0.17
+        uses: aquasecurity/trivy-action@8eccb5539730451af599c84f444c6d6cf0fc2bb0
         with:
-          name: release-packages
-          path: ./release-packages
-
-      - name: Run ./ci/steps/build-docker-image.sh
-        run: ./ci/steps/build-docker-image.sh
-
-      - name: Upload release image
-        uses: actions/upload-artifact@v2
+          scan-type: "fs"
+          scan-ref: "."
+          ignore-unfixed: true
+          format: "template"
+          template: "@/contrib/sarif.tpl"
+          output: "trivy-repo-results.sarif"
+          severity: "HIGH,CRITICAL"
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v1
         with:
-          name: release-images
-          path: ./release-images
-
-  # TODO: this is the last place where we use our self-hosted arm64 runner.
-  # In the future, consider switching to docker buildx + qemu,
-  # thus removing the requirement for us to maintain the runner.
-  docker-arm64:
-    runs-on: ubuntu-arm64-latest
-    needs: package-linux-arm64
-    steps:
-      - uses: actions/checkout@v2
-
-      - name: Download release package
-        uses: actions/download-artifact@v2
-        with:
-          name: release-packages
-          path: ./release-packages
-
-      - name: Run ./ci/steps/build-docker-image.sh
-        run: ./ci/steps/build-docker-image.sh
-
-      - name: Upload release image
-        uses: actions/upload-artifact@v2
-        with:
-          name: release-images
-          path: ./release-images
+          sarif_file: "trivy-repo-results.sarif"

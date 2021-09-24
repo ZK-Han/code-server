@@ -6,6 +6,11 @@ import * as path from "path"
 import { Args as VsArgs } from "../../typings/ipc"
 import { canConnect, generateCertificate, generatePassword, humanPath, paths } from "./util"
 
+export enum Feature {
+  /** Web socket compression. */
+  PermessageDeflate = "permessage-deflate",
+}
+
 export enum AuthType {
   Password = "password",
   None = "none",
@@ -35,6 +40,7 @@ export interface Args extends VsArgs {
   "cert-key"?: string
   "disable-telemetry"?: boolean
   "disable-update-check"?: boolean
+  enable?: string[]
   help?: boolean
   host?: string
   json?: boolean
@@ -108,7 +114,7 @@ const options: Options<Required<Args>> = {
   "hashed-password": {
     type: "string",
     description:
-      "The password hashed with SHA-256 for password authentication (can only be passed in via $HASHED_PASSWORD or the config file). \n" +
+      "The password hashed with argon2 for password authentication (can only be passed in via $HASHED_PASSWORD or the config file). \n" +
       "Takes precedence over 'password'.",
   },
   cert: {
@@ -128,6 +134,9 @@ const options: Options<Required<Args>> = {
       "Disable update check. Without this flag, code-server checks every 6 hours against the latest github release and \n" +
       "then notifies you once every week that a new release is available.",
   },
+  // --enable can be used to enable experimental features. These features
+  // provide no guarantees.
+  enable: { type: "string[]" },
   help: { type: "boolean", short: "h", description: "Show this output." },
   json: { type: "boolean" },
   open: { type: "boolean", description: "Open in browser on startup. Does not work remotely." },
@@ -231,6 +240,19 @@ export const optionDescriptions = (): string[] => {
   })
 }
 
+export function splitOnFirstEquals(str: string): string[] {
+  // we use regex instead of "=" to ensure we split at the first
+  // "=" and return the following substring with it
+  // important for the hashed-password which looks like this
+  // $argon2i$v=19$m=4096,t=3,p=1$0qR/o+0t00hsbJFQCKSfdQ$oFcM4rL6o+B7oxpuA4qlXubypbBPsf+8L531U7P9HYY
+  // 2 means return two items
+  // Source: https://stackoverflow.com/a/4607799/3015595
+  // We use the ? to say the the substr after the = is optional
+  const split = str.split(/=(.+)?/, 2)
+
+  return split
+}
+
 export const parse = (
   argv: string[],
   opts?: {
@@ -241,6 +263,7 @@ export const parse = (
     if (opts?.configFile) {
       msg = `error reading ${opts.configFile}: ${msg}`
     }
+
     return new Error(msg)
   }
 
@@ -261,7 +284,7 @@ export const parse = (
       let key: keyof Args | undefined
       let value: string | undefined
       if (arg.startsWith("--")) {
-        const split = arg.replace(/^--/, "").split("=", 2)
+        const split = splitOnFirstEquals(arg.replace(/^--/, ""))
         key = split[0] as keyof Args
         value = split[1]
       } else {
@@ -571,7 +594,11 @@ interface Addr {
   port: number
 }
 
-function bindAddrFromArgs(addr: Addr, args: Args): Addr {
+/**
+ * This function creates the bind address
+ * using the CLI args.
+ */
+export function bindAddrFromArgs(addr: Addr, args: Args): Addr {
   addr = { ...addr }
   if (args["bind-addr"]) {
     addr = parseBindAddr(args["bind-addr"])
@@ -603,7 +630,18 @@ function bindAddrFromAllSources(...argsConfig: Args[]): Addr {
 }
 
 export const shouldRunVsCodeCli = (args: Args): boolean => {
-  return !!args["list-extensions"] || !!args["install-extension"] || !!args["uninstall-extension"]
+  // Create new interface with only Arg keys
+  // keyof Args
+  // Turn that into an array
+  // Array<...>
+  type ExtensionArgs = Array<keyof Args>
+  const extensionRelatedArgs: ExtensionArgs = ["list-extensions", "install-extension", "uninstall-extension"]
+
+  const argKeys = Object.keys(args)
+
+  // If any of the extensionRelatedArgs are included in args
+  // then we don't want to run the vscode cli
+  return extensionRelatedArgs.some((arg) => argKeys.includes(arg))
 }
 
 /**

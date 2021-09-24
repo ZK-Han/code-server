@@ -3,10 +3,12 @@ import { Request, Router } from "express"
 import { promises as fs } from "fs"
 import * as path from "path"
 import qs from "qs"
+import * as ipc from "../../../typings/ipc"
 import { Emitter } from "../../common/emitter"
 import { HttpCode, HttpError } from "../../common/http"
 import { getFirstString } from "../../common/util"
-import { commit, rootPath, version } from "../constants"
+import { Feature } from "../cli"
+import { isDevMode, rootPath, version } from "../constants"
 import { authenticated, ensureAuthenticated, redirect, replaceTemplates } from "../http"
 import { getMediaMime, pathToFsPath } from "../util"
 import { VscodeProvider } from "../vscode"
@@ -17,7 +19,8 @@ export const router = Router()
 const vscode = new VscodeProvider()
 
 router.get("/", async (req, res) => {
-  if (!authenticated(req)) {
+  const isAuthenticated = await authenticated(req)
+  if (!isAuthenticated) {
     return redirect(req, res, "login", {
       // req.baseUrl can be blank if already at the root.
       to: req.baseUrl && req.baseUrl !== "/" ? req.baseUrl : undefined,
@@ -30,7 +33,7 @@ router.get("/", async (req, res) => {
       try {
         return await vscode.initialize({ args: req.args, remoteAuthority: req.headers.host || "" }, req.query)
       } catch (error) {
-        const devMessage = commit === "development" ? "It might not have finished compiling." : ""
+        const devMessage = isDevMode ? "It might not have finished compiling." : ""
         throw new Error(`VS Code failed to load. ${devMessage} ${error.message}`)
       }
     })(),
@@ -39,13 +42,13 @@ router.get("/", async (req, res) => {
   options.productConfiguration.codeServerVersion = version
 
   res.send(
-    replaceTemplates(
+    replaceTemplates<ipc.Options>(
       req,
       // Uncomment prod blocks if not in development. TODO: Would this be
       // better as a build step? Or maintain two HTML files again?
-      commit !== "development" ? content.replace(/<!-- PROD_ONLY/g, "").replace(/END_PROD_ONLY -->/g, "") : content,
+      !isDevMode ? content.replace(/<!-- PROD_ONLY/g, "").replace(/END_PROD_ONLY -->/g, "") : content,
       {
-        disableTelemetry: !!req.args["disable-telemetry"],
+        authed: req.args.auth !== "none",
         disableUpdateCheck: !!req.args["disable-update-check"],
       },
     )
@@ -60,9 +63,10 @@ router.get("/", async (req, res) => {
  * TODO: Might currently be unused.
  */
 router.get("/resource(/*)?", ensureAuthenticated, async (req, res) => {
-  if (typeof req.query.path === "string") {
-    res.set("Content-Type", getMediaMime(req.query.path))
-    res.send(await fs.readFile(pathToFsPath(req.query.path)))
+  const path = getFirstString(req.query.path)
+  if (path) {
+    res.set("Content-Type", getMediaMime(path))
+    res.send(await fs.readFile(pathToFsPath(path)))
   }
 })
 
@@ -70,9 +74,10 @@ router.get("/resource(/*)?", ensureAuthenticated, async (req, res) => {
  * Used by VS Code to load files.
  */
 router.get("/vscode-remote-resource(/*)?", ensureAuthenticated, async (req, res) => {
-  if (typeof req.query.path === "string") {
-    res.set("Content-Type", getMediaMime(req.query.path))
-    res.send(await fs.readFile(pathToFsPath(req.query.path)))
+  const path = getFirstString(req.query.path)
+  if (path) {
+    res.set("Content-Type", getMediaMime(path))
+    res.send(await fs.readFile(pathToFsPath(path)))
   }
 })
 
@@ -161,7 +166,7 @@ router.get("/callback", ensureAuthenticated, async (req, res) => {
   callbacks.set(id, callback)
   callbackEmitter.emit({ id, callback })
 
-  res.sendFile(path.join(rootPath, "lib/vscode/resources/web/callback.html"))
+  res.sendFile(path.join(rootPath, "vendor/modules/code-oss-dev/resources/web/callback.html"))
 })
 
 router.get("/fetch-callback", ensureAuthenticated, async (req, res) => {
@@ -207,14 +212,21 @@ wsRouter.ws("/", ensureAuthenticated, async (req) => {
     `Sec-WebSocket-Accept: ${reply}`,
   ]
 
+  // See if the browser reports it supports web socket compression.
   // TODO: Parse this header properly.
   const extensions = req.headers["sec-websocket-extensions"]
-  const permessageDeflate = extensions ? extensions.includes("permessage-deflate") : false
-  if (permessageDeflate) {
+  const isCompressionSupported = extensions ? extensions.includes("permessage-deflate") : false
+
+  // TODO: For now we only use compression if the user enables it.
+  const isCompressionEnabled = !!req.args.enable?.includes(Feature.PermessageDeflate)
+
+  const useCompression = isCompressionEnabled && isCompressionSupported
+  if (useCompression) {
+    // This response header tells the browser the server supports compression.
     responseHeaders.push("Sec-WebSocket-Extensions: permessage-deflate; server_max_window_bits=15")
   }
 
   req.ws.write(responseHeaders.join("\r\n") + "\r\n\r\n")
 
-  await vscode.sendWebsocket(req.ws, req.query, permessageDeflate)
+  await vscode.sendWebsocket(req.ws, req.query, useCompression)
 })
